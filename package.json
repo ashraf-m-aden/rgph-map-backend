@@ -1,0 +1,36 @@
+{
+  "name": "rgph-djibouti-2024-api",
+  "version": "1.0.0",
+  "description": "API Backend - Résultats RGPH 2024 Djibouti",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "seed": "node src/seeds/index.js",
+    "seed:geo": "node src/seeds/seedGeoData.js",
+    "seed:demo": "node src/seeds/seedDemoData.js",
+    "seed:economic": "node src/seeds/seedEconomicData.js",
+    "seed:economic-ext": "node src/seeds/seedEconomicDataExtended.js",
+    "seed:all": "node src/seeds/index.js && node src/seeds/seedEconomicData.js && node src/seeds/seedEconomicDataExtended.js",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "docker:rebuild": "docker-compose up -d --build",
+    "docker:backup": "./scripts/backup-mongo.sh",
+    "docker:restore": "./scripts/restore-mongo.sh"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "mongoose": "^8.7.0",
+    "morgan": "^1.10.0",
+    "helmet": "^7.1.0",
+    "compression": "^1.7.4",
+    "express-rate-limit": "^7.4.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
