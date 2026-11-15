@@ -5,7 +5,6 @@
  * République de Djibouti
  */
 
-import mongoose from "mongoose";
 
 // Assurez-vous d'avoir "type": "module" dans votre package.json
 import dotenv from 'dotenv';
@@ -415,9 +414,12 @@ async function seedEconomicData() {
     console.log(`   📊 ${keyFigures.length} key figures`);
     console.log(`   📈 ${indicators.length} indicators`);
 
-    // Clear existing economic data
-    await KeyFigure.deleteMany({ themeSlug: 'caracteristiques-economiques' });
-    await Indicator.deleteMany({ themeSlug: 'caracteristiques-economiques' });
+    // Ne purger que ce que CE script reinsere. Un deleteMany sur tout le
+    // themeSlug effacait aussi les indicateurs de seedEconomicDataExtended.js,
+    // rendant l'ordre des seeds significatif (cf. AUDIT B-10).
+    const seededCodes = [...new Set(indicators.map((i) => i.indicatorCode))];
+    await KeyFigure.deleteMany({ code: { $in: keyFigures.map((k) => k.code) } });
+    await Indicator.deleteMany({ themeSlug: theme, indicatorCode: { $in: seededCodes } });
 
     // Insert
     await KeyFigure.insertMany(keyFigures);

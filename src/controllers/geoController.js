@@ -1,40 +1,47 @@
-import { GeoData } from "../models/GeoData.js";
-import fs from 'fs';
-import path from 'path';
-import dotenv from "dotenv";
-import { fileURLToPath } from "url";
+import fs from "fs";
 import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { GeoData } from "../models/GeoData.js";
+import { ADMIN_LEVELS } from "../utils/query.js";
 
-dotenv.config({ path: join(__dirname, "../../.env") });
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Le fichier embarque ne decrit que les 6 regions : il ne peut servir de
+// repli que pour ce niveau (il renvoyait auparavant les regions pour
+// n'importe quel niveau demande, avec success: true).
+const FALLBACK_FILES = {
+  region: join(__dirname, "../../data/djibouti-regions.geojson"),
+};
 
 export const getGeoJSON = async (req, res, next) => {
   try {
     const { level } = req.params;
-    console.log(level);
-    
-    const geoData = await GeoData.findOne({ level });
-    if (geoData) {
-      res.set('Cache-Control', 'public, max-age=86400');
-      return res.json({ success: true, data: geoData.geojson });
+
+    if (!ADMIN_LEVELS.includes(level)) {
+      return res.status(400).json({
+        success: false,
+        error: `Niveau inconnu : "${level}" (attendu : ${ADMIN_LEVELS.join(", ")})`,
+      });
     }
 
-    // Fallback: serve directly from file
-    const filePath = path.join(__dirname, '../../data/djibouti-regions.geojson');
-    if (fs.existsSync(filePath)) {
-      const geojson = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-      res.set('Cache-Control', 'public, max-age=86400');
-      return res.json({ success: true, data: geojson });
-    }
-    if (!geoData) {
-      return res.status(404).json({ success: false, error: 'Données géographiques non trouvées' });
+    const geoData = await GeoData.findOne({ level }).lean();
+    if (geoData?.geojson) {
+      res.set("Cache-Control", "public, max-age=86400");
+      return res.json({ success: true, data: geoData.geojson, source: "database" });
     }
 
-    // Set cache headers (GeoJSON rarely changes)
-    res.set('Cache-Control', 'public, max-age=86400');
-    res.json({ success: true, data: geoData.geojson });
+    const fallbackPath = FALLBACK_FILES[level];
+    if (fallbackPath && fs.existsSync(fallbackPath)) {
+      const geojson = JSON.parse(fs.readFileSync(fallbackPath, "utf-8"));
+      res.set("Cache-Control", "public, max-age=86400");
+      return res.json({ success: true, data: geojson, source: "file" });
+    }
+
+    return res.status(404).json({
+      success: false,
+      error: `Données géographiques non trouvées pour le niveau "${level}"`,
+    });
   } catch (error) {
     next(error);
   }

@@ -1,9 +1,7 @@
-import mongoose from "mongoose";
 // Assurez-vous d'avoir "type": "module" dans votre package.json
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import path from 'path';
 import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -213,7 +211,7 @@ async function seed() {
 
   // Seed GeoData from GeoJSON file
     await GeoData.deleteMany({});
-    const geojsonPath = path.join(__dirname, '../../data/djibouti-regions.geojson');
+    const geojsonPath = join(__dirname, '../../data/djibouti-regions.geojson');
     if (fs.existsSync(geojsonPath)) {
       const geojsonRaw = fs.readFileSync(geojsonPath, 'utf-8');
       const geojson = JSON.parse(geojsonRaw);
