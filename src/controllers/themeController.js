@@ -5,12 +5,12 @@ import { Theme } from "../models/Theme.js";
 
 export const getAll = async (req, res, next) => {
   try {
-    const themes = await Theme.find({ isPublished: true }).sort({ sortOrder: 1 });
+    const themes = await Theme.find({ isPublished: true }).sort({ sortOrder: 1 }).lean();
 
     // Build hierarchical structure
     const rootThemes = themes.filter(t => !t.parentSlug);
     const hierarchy = rootThemes.map(root => ({
-      ...root.toObject(),
+      ...root,
       children: themes.filter(t => t.parentSlug === root.slug),
     }));
 
@@ -22,37 +22,59 @@ export const getAll = async (req, res, next) => {
 
 export const getBySlug = async (req, res, next) => {
   try {
-    const theme = await Theme.findOne({ slug: req.params.slug, isPublished: true });
+    const { slug } = req.params;
+
+    const theme = await Theme.findOne({ slug, isPublished: true }).lean();
     if (!theme) {
       return res.status(404).json({ success: false, error: 'Thème non trouvé' });
     }
 
-    // Get unique indicator codes for this theme
-    const indicatorCodes = await Indicator.distinct('indicatorCode', {
-      themeSlug: req.params.slug,
-    });
+    // Une seule agregation pour les metadonnees de chaque indicateur du theme :
+    // l'ancienne version enchainait un distinct() puis un findOne() par code
+    // (64 requetes pour ce theme), et ce findOne omettait le filtre themeSlug.
+    const [aggregated, regionLevelCodes] = await Promise.all([
+      Indicator.aggregate([
+        { $match: { themeSlug: slug } },
+        { $sort: { indicatorCode: 1, regionCode: 1 } },
+        {
+          $group: {
+            _id: "$indicatorCode",
+            name: { $first: "$name" },
+            unit: { $first: "$unit" },
+            visualization: { $first: "$visualization" },
+            regionCodes: { $addToSet: "$regionCode" },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      Region.find({ level: "region" }).select("code").lean(),
+    ]);
 
-    // Get indicator metadata (name, unit, etc.) for each code
-    const indicatorsMeta = await Promise.all(
-      indicatorCodes.map(async (code) => {
-        const sample = await Indicator.findOne({ indicatorCode: code }).select('name unit visualization');
-        return {
-          code,
-          name: sample?.name,
-          unit: sample?.unit,
-          visualization: sample?.visualization,
-        };
-      })
-    );
+    const regionCodes = new Set(regionLevelCodes.map(r => r.code));
+
+    // hasRegionalData distingue les indicateurs cartographiables de ceux qui
+    // n'existent qu'au niveau national : sans cette information le selecteur
+    // du frontend propose des indicateurs qui laissent la carte vide.
+    const indicators = aggregated.map(doc => ({
+      code: doc._id,
+      name: doc.name,
+      unit: doc.unit,
+      visualization: doc.visualization,
+      count: doc.count,
+      hasRegionalData: doc.regionCodes.some(code => regionCodes.has(code)),
+    }));
 
     // Get sub-themes
-    const subThemes = await Theme.find({ parentSlug: req.params.slug, isPublished: true }).sort({ sortOrder: 1 });
+    const subThemes = await Theme.find({ parentSlug: slug, isPublished: true })
+      .sort({ sortOrder: 1 })
+      .lean();
 
     res.json({
       success: true,
       data: {
         theme,
-        indicators: indicatorsMeta,
+        indicators,
         subThemes,
       },
     });
@@ -64,8 +86,10 @@ export const getBySlug = async (req, res, next) => {
 
 export const getKeyFigures = async (req, res, next) => {
   try {
-    const keyFigures = await KeyFigure.find({ themeSlug: req.params.slug }).sort({ sortOrder: 1 });
-    res.json({ success: true, data: keyFigures });
+    const keyFigures = await KeyFigure.find({ themeSlug: req.params.slug })
+      .sort({ sortOrder: 1 })
+      .lean();
+    res.json({ success: true, count: keyFigures.length, data: keyFigures });
   } catch (error) {
     next(error);
   }

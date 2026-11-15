@@ -7,7 +7,6 @@
  * Primo-demandeurs, Travail des enfants, Raisons d'inactivité
  */
 
-import mongoose from "mongoose";
 import { Indicator } from "../models/Indicator.js";
 // Assurez-vous d'avoir "type": "module" dans votre package.json
 import dotenv from "dotenv";
@@ -991,7 +990,10 @@ Object.entries(dependance).forEach(([code, val]) => {
     },
     code,
     val,
-    "percentage",
+    // Un rapport de dependance vaut 262,3 "inactifs pour 100 actifs" : le
+    // declarer en "percentage" le faisait figurer sur la meme echelle que des
+    // taux bornes a 100 (cf. AUDIT D-11).
+    "ratio",
     {},
     "choropleth",
     { page: 104 },
@@ -1007,7 +1009,7 @@ add(
   },
   "DJ",
   246.0,
-  "percentage",
+  "ratio",
   { milieu: "urbain" },
 );
 add(
@@ -1019,7 +1021,7 @@ add(
   },
   "DJ",
   408.8,
-  "percentage",
+  "ratio",
   { milieu: "rural" },
 );
 
@@ -1128,6 +1130,19 @@ async function seedExtendedData() {
     await connectDB();
     console.log("🌱 Seeding extended economic data (Part 2)...");
     console.log(`   📈 ${indicators.length} new indicators`);
+
+    // Ce script n'effacait rien avant d'inserer : chaque execution dupliquait
+    // ses 288 documents, et les doublons devenaient invisibles (cf. AUDIT
+    // B-10). On ne purge que les codes reinseres ici, pour ne pas toucher a
+    // ceux de seedEconomicData.js.
+    const seededCodes = [...new Set(indicators.map((i) => i.indicatorCode))];
+    const removed = await Indicator.deleteMany({
+      themeSlug: theme,
+      indicatorCode: { $in: seededCodes },
+    });
+    if (removed.deletedCount) {
+      console.log(`   🧹 ${removed.deletedCount} indicateurs existants remplaces`);
+    }
 
     await Indicator.insertMany(indicators);
     console.log(`   ✅ ${indicators.length} indicators inserted`);

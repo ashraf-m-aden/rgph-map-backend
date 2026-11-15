@@ -7,6 +7,21 @@ Identifiants : `C-xx` contrat d'API (impacte aussi le frontend), `B-xx` backend,
 `D-xx` données. Les anomalies du frontend sont dans
 `map-frontend/AUDIT.md` (`F-xx`).
 
+## État des corrections
+
+Branche `fix/audit-bloquants-majeurs` (depuis `docs/audit-architecture`) :
+**corrigés et vérifiés sur une base MongoDB réelle** — C-01, C-02, B-03, B-04,
+B-05, B-06, B-07, B-08, B-09, B-10, B-11, B-12, B-13, B-14, B-15, B-16, B-17,
+B-18, B-20, D-11.
+
+**Restent ouverts** (données à reprendre dans le Tome 3, hors portée d'un
+correctif de code) : D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09,
+D-10. D-01 et D-02 sont contournés côté interface — la carte d'accueil pointe
+sur un indicateur régional existant et l'API expose `hasRegionalData` — mais
+les données manquantes restent manquantes.
+
+---
+
 Sévérité : 🔴 bloquant · 🟠 majeur · 🟡 mineur.
 Colonne « Vérif. » : **exécuté** = reproduit par exécution de code,
 **lecture** = établi par lecture du code.
@@ -26,7 +41,7 @@ Colonne « Vérif. » : **exécuté** = reproduit par exécution de code,
 | B-09 | 🟠 | Aucune pagination : 460 documents renvoyés en un appel | exécuté |
 | B-10 | 🟠 | Le seed étendu ne purge rien → doublons à chaque exécution | lecture |
 | D-01 | 🟠 | `population_totale` n'existe qu'au national → carte d'accueil vide | exécuté |
-| D-02 | 🟠 | 34 des 64 codes d'indicateurs n'ont aucune donnée régionale | exécuté |
+| D-02 | 🟠 | 31 des 64 codes d'indicateurs n'ont aucune donnée régionale | exécuté |
 | D-03 | 🟠 | Population inactive : trois totaux contradictoires | exécuté |
 | B-11 | 🟡 | Scripts npm pointant des fichiers absents (`seed:geo`, `seed:demo`, `docker:*`, backup) | lecture |
 | B-12 | 🟡 | `.env` suivi par git | exécuté |
@@ -36,6 +51,7 @@ Colonne « Vérif. » : **exécuté** = reproduit par exécution de code,
 | B-16 | 🟡 | `/api/health` est la seule réponse sans enveloppe `success` | lecture |
 | B-17 | 🟡 | Imports inutilisés, imports `path` en double, `console.log` de débogage | exécuté |
 | B-18 | 🟡 | `credentials: true` sans session ; `CORS_ORIGIN` mono-origine | lecture |
+| B-20 | 🟡 | Recherche sensible aux accents : « chomage » ne trouve rien | exécuté |
 | D-04 | 🟡 | `raisons_non_emploi` ne somme qu'à 96,1 % | exécuté |
 | D-05 | 🟡 | Doublon exact sous deux codes : `effectif_actifs_occupes_region` / `actifs_occupes_region` | exécuté |
 | D-06 | 🟡 | `chomeurs_effectif` contient les chômeurs **élargis** mais s'intitule « Chômeurs » | exécuté |
@@ -43,6 +59,7 @@ Colonne « Vérif. » : **exécuté** = reproduit par exécution de code,
 | D-08 | 🟡 | 6 thèmes sur 7 sans aucune donnée | exécuté |
 | D-09 | 🟡 | GeoJSON grossier, dupliqué et divergent entre les deux dépôts ; aucun district | exécuté |
 | D-10 | 🟡 | Libellés `ar` / `en` recopiés du français dans deux séries | exécuté |
+| D-11 | 🟡 | `rapport_dependance` (262 à 409) déclaré en `percentage` au lieu de `ratio` | exécuté |
 
 ---
 
@@ -111,7 +128,7 @@ const max = Math.max(...values);   // -Infinity
 
 `JSON.stringify(Infinity)` produit `null` : la réponse annonce
 `scale: { min: null, max: null }` sans signaler que l'indicateur n'a aucune
-donnée au niveau demandé. C'est le cas de 34 codes sur 64 (D-02).
+donnée au niveau demandé. C'est le cas de 31 codes sur 64 (D-02).
 
 Deux défauts secondaires au même endroit : `value` est typé `Mixed`, aucune
 vérification numérique n'est faite ; et l'étalement d'un tableau en arguments
@@ -295,6 +312,20 @@ Par ailleurs `composables/useApi.ts` du frontend envoie un en-tête
 préalable `OPTIONS` à chaque appel en cross-origin (sans effet en production,
 où tout est en même origine).
 
+### B-20 🟡 Recherche sensible aux accents
+
+Relevé en interrogeant l'API peuplée : `GET /api/search?q=chomage` renvoie zéro
+résultat alors que `q=chômage` en renvoie six. Tous les libellés de la base
+étant accentués, la recherche échouait sur la saisie naturelle d'un clavier
+sans accent — le défaut le plus probable pour un visiteur.
+
+**Correctif appliqué** : `buildSearchRegex` (`src/utils/query.js`) échappe la
+saisie puis étend chaque voyelle en classe de caractères (`o` → `[oôöóòõ…]`).
+Le motif reste entièrement construit par le code, donc sans risque de ReDoS
+(B-07). Vérifié : `chomage`, `chômage` et `CHOMAGE` renvoient les mêmes six
+indicateurs, et `education` trouve désormais le thème « Éducation et
+analphabétisme ».
+
 ---
 
 ## Données
@@ -317,13 +348,13 @@ tel que `pop_15plus`.
 
 ### D-02 🟠 Plus de la moitié des indicateurs sont invisibles sur une carte
 
-Sur les 64 codes distincts, **34 n'existent qu'au niveau national** (`DJ`) :
+Sur les 64 codes distincts, **31 n'existent qu'au niveau national** (`DJ`) :
 ventilations par sexe, tranche d'âge, milieu, niveau d'instruction, statut
 matrimonial, branche et secteur institutionnel. Comme `map-data` filtre sur
 `level=region`, ces codes renvoient 6 valeurs nulles.
 
 Le sélecteur d'indicateurs de la page thème est pourtant alimenté par la liste
-complète : l'utilisateur peut choisir 34 entrées qui n'afficheront rien.
+complète : l'utilisateur peut choisir 31 entrées qui n'afficheront rien.
 
 Rien dans le modèle ne distingue un indicateur national d'un indicateur
 régional. `visualization.showOnMap` vaut `true` pour tous.
@@ -429,3 +460,17 @@ langues. Dans `seedEconomicDataExtended.js`, `secteur_inst_sexe` utilise
 **code technique** (`public_admin`, `prive_informel`…). Le modèle impose les
 trois langues, la contrainte est donc satisfaite formellement mais pas
 réellement.
+
+### D-11 🟡 Rapport de dépendance : une unité fausse
+
+Relevé en affichant la fiche d'Ali Sabieh : `rapport_dependance` vaut 376,7 et
+`rapport_dependance_milieu` jusqu'à 408,8 — ce sont des rapports (« inactifs
+pour 100 actifs »), mais ils étaient semés avec `unit: 'percentage'`. Sur un
+graphique regroupant les pourcentages d'une région, cette série écrasait
+l'échelle : les taux réellement bornés à 100 devenaient illisibles.
+
+L'énumération du modèle contient déjà `ratio`.
+
+**Correctif appliqué** : les trois entrées passent en `unit: 'ratio'` dans
+`seedEconomicDataExtended.js`. L'interface regroupe un graphique par unité, le
+ratio a donc sa propre échelle.

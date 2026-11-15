@@ -1,27 +1,90 @@
 import { Indicator } from "../models/Indicator.js";
 import { Region } from "../models/Region.js";
-import { Theme } from "../models/Theme.js";
+import { ADMIN_LEVELS, DEFAULT_LANG, LANGS, parsePagination } from "../utils/query.js";
+
+/**
+ * Un indicateur est une cellule (code, region, desagregation). Quand aucune
+ * desagregation n'est demandee, seule la ligne "ensemble" (desagregation vide)
+ * represente la region : prendre le premier document venu afficherait une
+ * valeur au hasard parmi "ensemble", "masculin", "feminin"...
+ */
+const isTotal = (doc) =>
+  !doc.disaggregation || Object.keys(doc.disaggregation).length === 0;
+
+const pickForRegion = (docs, regionCode, disaggregationRequested) => {
+  const matches = docs.filter((d) => d.regionCode === regionCode);
+  if (matches.length === 0) return null;
+  if (disaggregationRequested) return matches[0];
+  return matches.find(isTotal) ?? null;
+};
+
+/**
+ * Accepte les deux syntaxes de desagregation :
+ *   ?disaggregation[sexe]=masculin   (objet imbrique produit par Express)
+ *   ?disaggregation.sexe=masculin    (clefs a plat)
+ *   ?disaggregation={"sexe":"masculin"}  (JSON, utilise par map-data)
+ */
+const extractDisaggregation = (query) => {
+  const out = {};
+
+  if (typeof query.disaggregation === "string") {
+    try {
+      Object.assign(out, JSON.parse(query.disaggregation));
+    } catch {
+      return { error: 'Le parametre "disaggregation" n\'est pas un JSON valide' };
+    }
+  } else if (query.disaggregation && typeof query.disaggregation === "object") {
+    Object.assign(out, query.disaggregation);
+  }
+
+  Object.keys(query).forEach((key) => {
+    if (key.startsWith("disaggregation.")) {
+      out[key.slice("disaggregation.".length)] = query[key];
+    }
+  });
+
+  return { value: out };
+};
+
+const disaggregationFilter = (disagg) =>
+  Object.fromEntries(
+    Object.entries(disagg).map(([key, value]) => [`disaggregation.${key}`, value]),
+  );
 
 export const getAll = async (req, res, next) => {
   try {
-    const { theme, indicator, region, year, ...disaggregations } = req.query;
-    const filter = {};
+    const { theme, indicator, region, year } = req.query;
+    const { limit, offset } = parsePagination(req.query);
+    const disagg = extractDisaggregation(req.query);
+    if (disagg.error) {
+      return res.status(400).json({ success: false, error: disagg.error });
+    }
 
+    const filter = { ...disaggregationFilter(disagg.value) };
     if (theme) filter.themeSlug = theme;
     if (indicator) filter.indicatorCode = indicator;
     if (region) filter.regionCode = region;
-    if (year) filter.year = parseInt(year);
-
-    // Handle disaggregation filters
-    // e.g., ?disaggregation.sexe=masculin&disaggregation.milieu=urbain
-    Object.keys(disaggregations).forEach(key => {
-      if (key.startsWith('disaggregation.')) {
-        filter[key] = disaggregations[key];
+    if (year) {
+      const parsed = Number.parseInt(year, 10);
+      if (Number.isNaN(parsed)) {
+        return res.status(400).json({ success: false, error: 'Le parametre "year" doit etre un nombre' });
       }
-    });
+      filter.year = parsed;
+    }
 
-    const indicators = await Indicator.find(filter).sort({ regionCode: 1 });
-    res.json({ success: true, count: indicators.length, data: indicators });
+    const [total, indicators] = await Promise.all([
+      Indicator.countDocuments(filter),
+      Indicator.find(filter).sort({ indicatorCode: 1, regionCode: 1 }).skip(offset).limit(limit).lean(),
+    ]);
+
+    res.json({
+      success: true,
+      count: indicators.length,
+      total,
+      limit,
+      offset,
+      data: indicators,
+    });
   } catch (error) {
     next(error);
   }
@@ -31,22 +94,35 @@ export const getByTheme = async (req, res, next) => {
   try {
     const { themeSlug } = req.params;
     const { regionCode, level } = req.query;
+    const { limit, offset } = parsePagination(req.query);
 
     const filter = { themeSlug };
     if (regionCode) filter.regionCode = regionCode;
 
-    // If level is specified, get all regions at that level and filter
+    // Si un niveau est demande, restreindre aux regions de ce niveau
     if (level) {
-      const regions = await Region.find({ level }).select('code');
-      const regionCodes = regions.map(r => r.code);
-      filter.regionCode = { $in: regionCodes };
+      if (!ADMIN_LEVELS.includes(level)) {
+        return res.status(400).json({
+          success: false,
+          error: `Niveau inconnu : "${level}" (attendu : ${ADMIN_LEVELS.join(", ")})`,
+        });
+      }
+      const regions = await Region.find({ level }).select("code").lean();
+      filter.regionCode = { $in: regions.map((r) => r.code) };
     }
 
-    const indicators = await Indicator.find(filter).sort({ indicatorCode: 1, regionCode: 1 });
+    const [total, indicators] = await Promise.all([
+      Indicator.countDocuments(filter),
+      Indicator.find(filter)
+        .sort({ indicatorCode: 1, regionCode: 1 })
+        .skip(offset)
+        .limit(limit)
+        .lean(),
+    ]);
 
     // Group by indicator code
     const grouped = {};
-    indicators.forEach(ind => {
+    indicators.forEach((ind) => {
       if (!grouped[ind.indicatorCode]) {
         grouped[ind.indicatorCode] = {
           code: ind.indicatorCode,
@@ -59,11 +135,18 @@ export const getByTheme = async (req, res, next) => {
       grouped[ind.indicatorCode].data.push({
         regionCode: ind.regionCode,
         value: ind.value,
-        disaggregation: ind.disaggregation,
+        disaggregation: ind.disaggregation ?? {},
       });
     });
 
-    res.json({ success: true, data: Object.values(grouped) });
+    res.json({
+      success: true,
+      count: indicators.length,
+      total,
+      limit,
+      offset,
+      data: Object.values(grouped),
+    });
   } catch (error) {
     next(error);
   }
@@ -72,35 +155,38 @@ export const getByTheme = async (req, res, next) => {
 export const getMapData = async (req, res, next) => {
   try {
     const { indicatorCode } = req.params;
-    const { level = 'region', disaggregation } = req.query;
+    const { level = "region" } = req.query;
 
-    // Get regions at the specified level
-    const regions = await Region.find({ level }).select('code name center');
-    const regionCodes = regions.map(r => r.code);
-
-    // Build filter
-    const filter = {
-      indicatorCode,
-      regionCode: { $in: regionCodes },
-    };
-
-    // Parse disaggregation filter if provided
-    if (disaggregation) {
-      try {
-        const disagg = JSON.parse(disaggregation);
-        Object.keys(disagg).forEach(key => {
-          filter[`disaggregation.${key}`] = disagg[key];
-        });
-      } catch (e) {
-        // Ignore parse errors
-      }
+    if (!ADMIN_LEVELS.includes(level)) {
+      return res.status(400).json({
+        success: false,
+        error: `Niveau inconnu : "${level}" (attendu : ${ADMIN_LEVELS.join(", ")})`,
+      });
     }
 
-    const indicators = await Indicator.find(filter);
+    const disagg = extractDisaggregation(req.query);
+    if (disagg.error) {
+      return res.status(400).json({ success: false, error: disagg.error });
+    }
+    const hasDisaggregation = Object.keys(disagg.value).length > 0;
 
-    // Build map-ready data
-    const mapData = regions.map(region => {
-      const ind = indicators.find(i => i.regionCode === region.code);
+    const regions = await Region.find({ level }).select("code name center sortOrder").sort({ sortOrder: 1 }).lean();
+
+    const indicators = await Indicator.find({
+      indicatorCode,
+      regionCode: { $in: regions.map((r) => r.code) },
+      ...disaggregationFilter(disagg.value),
+    }).lean();
+
+    // Regions pour lesquelles il n'existe que des valeurs ventilees : on ne
+    // peut pas en deduire un total, la valeur reste nulle et on le signale.
+    const disaggregatedOnly = [];
+
+    const mapData = regions.map((region) => {
+      const ind = pickForRegion(indicators, region.code, hasDisaggregation);
+      if (!ind && indicators.some((i) => i.regionCode === region.code)) {
+        disaggregatedOnly.push(region.code);
+      }
       return {
         regionCode: region.code,
         regionName: region.name,
@@ -110,18 +196,24 @@ export const getMapData = async (req, res, next) => {
       };
     });
 
-    // Calculate min/max for color scale
-    const values = mapData.filter(d => d.value !== null).map(d => d.value);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
+    // Echelle de couleurs : null si aucune valeur numerique, plutot que les
+    // Infinity produits par Math.min/max sur un tableau vide (serialises en
+    // JSON par "null", donc indistinguables d'une vraie valeur).
+    const values = mapData.map((d) => d.value).filter((v) => typeof v === "number" && Number.isFinite(v));
+    const scale = values.length
+      ? { min: values.reduce((a, b) => Math.min(a, b)), max: values.reduce((a, b) => Math.max(a, b)) }
+      : null;
 
     res.json({
       success: true,
       data: {
         indicatorCode,
+        level,
         mapData,
-        scale: { min, max },
-        visualization: indicators[0]?.visualization || {},
+        scale,
+        hasData: values.length > 0,
+        disaggregatedOnly,
+        visualization: indicators[0]?.visualization ?? {},
       },
     });
   } catch (error) {
@@ -140,13 +232,24 @@ export const compare = async (req, res, next) => {
       });
     }
 
-    const regionCodes = regions.split(',');
+    const regionCodes = regions
+      .split(",")
+      .map((code) => code.trim())
+      .filter(Boolean);
+
+    if (regionCodes.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le paramètre "regions" doit contenir au moins un code',
+      });
+    }
+
     const data = await Indicator.find({
       indicatorCode: indicator,
       regionCode: { $in: regionCodes },
-    });
+    }).lean();
 
-    res.json({ success: true, data });
+    res.json({ success: true, count: data.length, data });
   } catch (error) {
     next(error);
   }
@@ -155,31 +258,55 @@ export const compare = async (req, res, next) => {
 export const getChartData = async (req, res, next) => {
   try {
     const { indicatorCode } = req.params;
-    const { level = 'region', groupBy = 'region' } = req.query;
+    const { level = "region", groupBy = "region", lang = DEFAULT_LANG } = req.query;
 
-    const regions = await Region.find({ level });
-    const regionCodes = regions.map(r => r.code);
+    if (!ADMIN_LEVELS.includes(level)) {
+      return res.status(400).json({
+        success: false,
+        error: `Niveau inconnu : "${level}" (attendu : ${ADMIN_LEVELS.join(", ")})`,
+      });
+    }
+    if (!LANGS.includes(lang)) {
+      return res.status(400).json({
+        success: false,
+        error: `Langue inconnue : "${lang}" (attendu : ${LANGS.join(", ")})`,
+      });
+    }
+    if (groupBy !== "region") {
+      return res.status(400).json({
+        success: false,
+        error: `Regroupement non supporté : "${groupBy}" (attendu : region)`,
+      });
+    }
+
+    const disagg = extractDisaggregation(req.query);
+    if (disagg.error) {
+      return res.status(400).json({ success: false, error: disagg.error });
+    }
+    const hasDisaggregation = Object.keys(disagg.value).length > 0;
+
+    const regions = await Region.find({ level }).select("code name sortOrder").sort({ sortOrder: 1 }).lean();
 
     const indicators = await Indicator.find({
       indicatorCode,
-      regionCode: { $in: regionCodes },
-    });
+      regionCode: { $in: regions.map((r) => r.code) },
+      ...disaggregationFilter(disagg.value),
+    }).lean();
 
-    // Format for chart consumption
+    // Les libelles doivent etre des chaines : renvoyer l'objet { fr, ar, en }
+    // ferait afficher "[object Object]" sur l'axe du graphique.
     const chartData = {
-      labels: [],
-      datasets: [],
+      labels: regions.map((r) => r.name?.[lang] ?? r.name?.[DEFAULT_LANG] ?? r.code),
+      datasets: [
+        {
+          label: indicators[0]?.name?.[lang] ?? indicators[0]?.name?.[DEFAULT_LANG] ?? indicatorCode,
+          data: regions.map((r) => {
+            const ind = pickForRegion(indicators, r.code, hasDisaggregation);
+            return ind ? ind.value : null;
+          }),
+        },
+      ],
     };
-
-    if (groupBy === 'region') {
-      chartData.labels = regions.map(r => r.name);
-      chartData.datasets.push({
-        data: regions.map(r => {
-          const ind = indicators.find(i => i.regionCode === r.code);
-          return ind ? ind.value : 0;
-        }),
-      });
-    }
 
     res.json({ success: true, data: chartData });
   } catch (error) {

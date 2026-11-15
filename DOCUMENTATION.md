@@ -17,7 +17,7 @@ Pour les anomalies relevées lors de l'audit, voir [`AUDIT.md`](AUDIT.md).
 | Express | 4.21 | serveur HTTP et routage |
 | Mongoose | 8.7 | ODM MongoDB |
 | helmet, cors, compression, morgan | — | sécurité, CORS, gzip, logs (dev) |
-| express-rate-limit | 7.4 | **déclarée mais jamais montée** (cf. AUDIT B-03) |
+| express-rate-limit | 7.4 | limitation de débit sur `/api` (fenêtre et plafond par variables d'env.) |
 | nodemon | 3.1 | rechargement en développement |
 
 Aucun test, aucun linter, aucun typage : le dépôt est du JavaScript nu.
@@ -37,6 +37,7 @@ src/
 │   └── GeoData.js            FeatureCollection GeoJSON par niveau
 ├── routes/                   5 routeurs, un par préfixe /api/*
 ├── controllers/              5 contrôleurs (logique de requête)
+├── utils/query.js            validation des paramètres, pagination, recherche
 └── seeds/                    peuplement de la base (3 scripts)
 data/djibouti-regions.geojson GeoJSON des 6 régions, servi en secours
 scripts/                      backup / restore mongo (obsolètes, cf. AUDIT B-11)
@@ -58,7 +59,9 @@ npm run seed:all              # peuple régions, thèmes, geo, indicateurs
 ```
 
 `seed:all` enchaîne `seeds/index.js`, `seedEconomicData.js` puis
-`seedEconomicDataExtended.js` — **l'ordre compte** (cf. AUDIT B-10).
+`seedEconomicDataExtended.js`. Chaque script ne purge que les codes qu'il
+réinsère : les trois sont idempotents et peuvent être rejoués isolément, dans
+n'importe quel ordre.
 
 ### Variables d'environnement
 
@@ -69,7 +72,7 @@ npm run seed:all              # peuple régions, thèmes, geo, indicateurs
 | `MONGODB_URI` | — | obligatoire ; absence = `process.exit(1)` |
 | `CORS_ORIGIN` | `http://localhost:3000` | origine unique autorisée |
 | `USE_CLUSTER` | false | `true` = un worker par CPU |
-| `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX` | — | **aucun effet** : jamais lues par le code |
+| `RATE_LIMIT_WINDOW_MS`, `RATE_LIMIT_MAX` | 900000 / 100 | fenêtre et plafond par IP sur `/api` (`/api/health` exclu) |
 
 ## 4. Modèle de données
 
@@ -134,66 +137,74 @@ régional, par sexe…) et c'est au consommateur de filtrer.
 ## 5. Référence des routes
 
 Toutes les routes sont en lecture seule (`GET`). Réponse nominale :
-`{ success: true, data: … }` ; erreur : `{ success: false, error: "…" }`.
-⚠ marque un écart entre l'intention affichée et le comportement réel.
+`{ success: true, data: … }` ; erreur : `{ success: false, error: "…" }` —
+404 et erreurs serveur comprises. Les routes de liste ajoutent `count`,
+`total`, `limit` et `offset`.
+
+Pagination commune : `?limit=` (200 par défaut, 1000 au maximum) et `?offset=`.
+Une valeur hors bornes est ramenée dans l'intervalle, jamais rejetée.
+
+Un `level` hors de `country|region|district|commune` et une `lang` hors de
+`fr|ar|en` renvoient 400.
 
 ### Santé
 
 | Route | Réponse |
 |---|---|
-| `GET /api/health` | `{ status: "ok", service, timestamp }` — **sans** `success` |
+| `GET /api/health` | `{ success: true, status: "ok", service, timestamp }` ; exclu de la limitation de débit |
 
 ### Régions
 
 | Route | Comportement |
 |---|---|
-| `GET /api/regions` | ⚠ **renvoie la hiérarchie des thèmes**, pas les régions (AUDIT C-01) |
+| `GET /api/regions` | régions actives triées par `sortOrder` ; filtres `?level=` et `?parentCode=` |
 | `GET /api/regions/:code` | une région active, sinon 404 |
 | `GET /api/regions/:code/children` | régions dont `parentCode = :code`, triées par `sortOrder` |
-| `GET /api/regions/:code/indicators` | tous les indicateurs de la région ; filtres `?themeSlug=&indicatorCode=` |
+| `GET /api/regions/:code/indicators` | indicateurs de la région ; filtres `?themeSlug=&indicatorCode=`, paginé |
 
 ### Thèmes
 
 | Route | Comportement |
 |---|---|
 | `GET /api/themes` | thèmes publiés racine, chacun enrichi de `children[]` |
-| `GET /api/themes/:slug` | `{ theme, indicators: [{ code, name, unit, visualization }], subThemes }` ; `indicators` vient de `distinct('indicatorCode')` puis d'un `findOne` par code |
+| `GET /api/themes/:slug` | `{ theme, indicators, subThemes }`. Chaque indicateur porte `{ code, name, unit, visualization, count, hasRegionalData }` — `hasRegionalData: false` signale un indicateur national, non cartographiable. Une seule agrégation, plus de requête par code |
 | `GET /api/themes/:slug/key-figures` | chiffres clés du thème, triés par `sortOrder` |
 
 ### Indicateurs
 
 | Route | Comportement |
 |---|---|
-| `GET /api/indicators` | ⚠ **renvoie la hiérarchie des thèmes** (AUDIT C-02) |
+| `GET /api/indicators` | documents bruts ; filtres `?theme=`, `?indicator=`, `?region=`, `?year=` et désagrégation (voir ci-dessous), paginé |
 | `GET /api/indicators/by-theme/:themeSlug` | regroupé par code : `[{ code, name, unit, visualization, data: [{ regionCode, value, disaggregation }] }]` ; filtres `?regionCode=` ou `?level=` |
-| `GET /api/indicators/map-data/:indicatorCode` | `?level=region` (défaut), `?disaggregation={"sexe":"masculin"}` (JSON encodé) → `{ indicatorCode, mapData: [{ regionCode, regionName, center, value, unit }], scale: { min, max }, visualization }`. Une entrée par région du niveau, `value: null` si la donnée manque |
+| `GET /api/indicators/map-data/:indicatorCode` | `?level=region` (défaut), `?disaggregation=…` → `{ indicatorCode, level, mapData: [{ regionCode, regionName, center, value, unit }], scale, hasData, disaggregatedOnly, visualization }`. Une entrée par région du niveau ; `scale` vaut `null` et `hasData` `false` quand aucune valeur numérique n'existe ; `disaggregatedOnly` liste les régions pour lesquelles seules des valeurs ventilées existent. Sans désagrégation demandée, seule la ligne « ensemble » est retenue |
 | `GET /api/indicators/compare` | `?indicator=&regions=DJ-AS,DJ-AR` → documents bruts ; 400 si un paramètre manque |
-| `GET /api/indicators/chart-data/:indicatorCode` | `?level=region&groupBy=region` → `{ labels, datasets: [{ data }] }` ; ⚠ `labels` contient des objets `{fr,ar,en}` (AUDIT B-06) |
+| `GET /api/indicators/chart-data/:indicatorCode` | `?level=region&groupBy=region&lang=fr` → `{ labels, datasets: [{ label, data }] }` ; `labels` sont des chaînes dans la langue demandée, `data` contient `null` pour une région sans valeur |
 
-Noter la divergence de syntaxe pour la désagrégation : JSON encodé sur
-`map-data`, forme `disaggregation.sexe=…` dans le code mort de
-`indicatorController.getAll`.
+Trois syntaxes de désagrégation sont acceptées partout :
+`?disaggregation[sexe]=masculin`, `?disaggregation.sexe=masculin` et
+`?disaggregation={"sexe":"masculin"}` (JSON encodé). Un JSON invalide
+renvoie 400.
 
 ### Géographie
 
 | Route | Comportement |
 |---|---|
-| `GET /api/geo/:level` | GeoData du niveau ; à défaut le fichier `data/djibouti-regions.geojson` ⚠ quel que soit le niveau demandé (AUDIT B-08) ; sinon 404. `Cache-Control: public, max-age=86400` |
+| `GET /api/geo/:level` | GeoData du niveau (`source: "database"`) ; à défaut, et **pour le seul niveau `region`**, le fichier `data/djibouti-regions.geojson` (`source: "file"`) ; sinon 404. Niveau invalide : 400. `Cache-Control: public, max-age=86400` |
 | `GET /data/<fichier>` | dossier `data/` servi tel quel (le GeoJSON est donc accessible par deux chemins) |
 
 ### Recherche
 
 | Route | Comportement |
 |---|---|
-| `GET /api/search?q=&lang=fr` | 400 si `q` fait moins de 2 caractères. Recherche par expression régulière sur `name.<lang>` dans les trois collections → `{ themes: [{slug,name,icon}], regions: [{code,name,level}], indicators: [{code,name,themeSlug,unit}] }` (5/5/10 résultats, indicateurs dédoublonnés par code) |
+| `GET /api/search?q=&lang=fr` | 400 si `q` fait moins de 2 caractères ou si `lang` est inconnue. Recherche sur `name.<lang>` dans les trois collections, insensible à la casse **et aux accents** (« chomage » trouve « chômage ») ; la saisie est échappée avant construction du motif → `{ themes: [{slug,name,icon}], regions: [{code,name,level}], indicators: [{code,name,themeSlug,unit}] }` (5/5/10 résultats, indicateurs dédoublonnés par code) |
 
 ## 6. Jeu de données livré par les seeds
 
 | Script | Contenu | Remise à zéro |
 |---|---|---|
 | `seeds/index.js` | 7 régions (1 pays + 6 régions), 7 thèmes, 1 GeoData | `deleteMany({})` sur Region, Theme, GeoData |
-| `seedEconomicData.js` | 9 chiffres clés + 172 indicateurs | `deleteMany({ themeSlug: 'caracteristiques-economiques' })` |
-| `seedEconomicDataExtended.js` | 288 indicateurs supplémentaires | **aucune** (AUDIT B-10) |
+| `seedEconomicData.js` | 9 chiffres clés + 172 indicateurs | ses propres `code` / `indicatorCode` |
+| `seedEconomicDataExtended.js` | 288 indicateurs supplémentaires | ses propres `indicatorCode` |
 
 Total : **460 documents `Indicator`, 64 codes distincts**, tous rattachés au seul
 thème `caracteristiques-economiques` (Tome 3). Les 6 autres thèmes
@@ -202,10 +213,10 @@ thème `caracteristiques-economiques` (Tome 3). Les 6 autres thèmes
 
 Couverture géographique des 64 codes :
 
-* **30 codes** couvrent les 6 régions → exploitables en choroplèthe
+* **33 codes** couvrent au moins une région → exploitables en choroplèthe
   (`taux_chomage_bit_region`, `pop_15plus`, `chomeurs_region`,
   `secteur_primaire_region`…) ;
-* **34 codes** n'existent que pour `regionCode: "DJ"` (national), souvent
+* **31 codes** n'existent que pour `regionCode: "DJ"` (national), souvent
   ventilés par sexe, âge, milieu ou niveau d'instruction → invisibles sur une
   carte `level=region` (AUDIT D-02).
 
@@ -224,12 +235,16 @@ D-07.
 * `helmet()` dans sa configuration par défaut ; CORS limité à `CORS_ORIGIN`
   (origine unique) avec `credentials: true` bien qu'aucune session ne soit
   utilisée.
-* **Aucune limitation de débit effective** malgré la dépendance et les variables
-  d'environnement (AUDIT B-03), et **aucune pagination** (AUDIT B-09) : une
-  requête peut rapatrier l'ensemble des indicateurs.
+* Limitation de débit par IP sur `/api` (`RATE_LIMIT_*`, `/api/health` exclu,
+  `trust proxy` à 1 pour voir l'IP réelle derrière le nginx de l'hôte) et
+  pagination plafonnée à 1000 documents sur toutes les routes de liste.
+  Les lectures passent par `.lean()`.
 * API strictement en lecture : pas de route d'écriture, pas d'authentification.
   Toute modification de données passe par un seed exécuté à la main.
 * Les messages d'erreur détaillés ne sortent qu'en `NODE_ENV=development`.
 * Journalisation HTTP (`morgan`) désactivée hors développement : en production
   les traces d'accès viennent du nginx de l'hôte.
-* `GET /api/geo/:level` est la seule réponse mise en cache (24 h).
+* `GET /api/geo/:level` est la seule réponse applicative mise en cache (24 h) ;
+  `/data` est servi avec `max-age=1d`.
+* Arrêt propre sur `SIGTERM`/`SIGINT` : fermeture du serveur HTTP puis de la
+  connexion Mongoose, avec sortie forcée au bout de 10 s.

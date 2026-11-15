@@ -1,9 +1,8 @@
 import express from 'express';
-import { getAll } from '../controllers/themeController.js';
-import { getByCode, getChildren, getIndicators } from '../controllers/regionController.js';
+import { getAll, getByCode, getChildren, getIndicators } from '../controllers/regionController.js';
 const router = express.Router();
 
-// GET /api/regions — List all regions (with optional level filter)
+// GET /api/regions — List all regions (with optional level/parentCode filter)
 router.get('/', getAll);
 
 // GET /api/regions/:code — Get a single region by code

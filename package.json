@@ -8,17 +8,9 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "seed": "node src/seeds/index.js",
-    "seed:geo": "node src/seeds/seedGeoData.js",
-    "seed:demo": "node src/seeds/seedDemoData.js",
     "seed:economic": "node src/seeds/seedEconomicData.js",
     "seed:economic-ext": "node src/seeds/seedEconomicDataExtended.js",
-    "seed:all": "node src/seeds/index.js && node src/seeds/seedEconomicData.js && node src/seeds/seedEconomicDataExtended.js",
-    "docker:up": "docker-compose up -d",
-    "docker:down": "docker-compose down",
-    "docker:logs": "docker-compose logs -f",
-    "docker:rebuild": "docker-compose up -d --build",
-    "docker:backup": "./scripts/backup-mongo.sh",
-    "docker:restore": "./scripts/restore-mongo.sh"
+    "seed:all": "node src/seeds/index.js && node src/seeds/seedEconomicData.js && node src/seeds/seedEconomicDataExtended.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
